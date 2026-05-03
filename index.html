@@ -134,12 +134,12 @@ body{font-family:'Source Sans 3',sans-serif;background:#0f1923;color:#e8ecf1;min
         <div class="auth-form-group">
             <label class="auth-form-label"><i class="fas fa-map-marker-alt mr-1 text-kopAccent"></i>Kecamatan <span class="text-danger">*</span></label>
             <select id="regKecamatan" class="input-field"><option value="">-- Memuat Data Kecamatan --</option></select>
-            <p class="text-xs text-muted mt-1"><i class="fas fa-info-circle mr-1"></i>Soal akan diambil sesuai kecamatan ini</p>
+            <p class="text-xs text-muted mt-1"><i class="fas fa-info-circle mr-1"></i>Soal akan diambil sesuai kecamatan ini (dari sistem KOREK API)</p>
         </div>
         <div class="auth-form-group">
             <label class="auth-form-label">NPSN Sekolah <span class="text-danger">*</span></label>
             <input type="text" id="regNpsn" class="input-field" placeholder="Contoh: 202xxxxx" oninput="this.value=this.value.replace(/[^0-9]/g,'')">
-            <p class="text-xs text-muted mt-1"><i class="fas fa-shield-alt mr-1 text-warning"></i>Data Anda terpisah per NPSN. Tidak bisa diakses sekolah lain.</p>
+            <p class="text-xs text-muted mt-1"><i class="fas fa-shield-alt mr-1 text-warning"></i>NPSN hanya untuk memisahkan data siswa, token, dan nilai per sekolah. Soal tetap bersifat kecamatan.</p>
         </div>
         <div class="auth-form-group"><label class="auth-form-label">Nama Sekolah <span class="text-danger">*</span></label><input type="text" id="regSekolah" class="input-field" placeholder="Nama Sekolah"></div>
         <div class="grid grid-cols-2 gap-4">
@@ -274,17 +274,26 @@ function populateRegKecDropdown(){
 function getKecNama(id){if(!id)return'-';var k=kecamatanList.find(function(x){return x.id===id});return k?k.nama:'Tidak Dikenal'}
 
 /* ============================================================
-   FILTER DATA BERDASARKAN KEAMANAN: kecamatanId + npsn
-   Setiap guru hanya mengakses data dari kecamatan & NPSN-nya sendiri.
+   FILTER DATA — ARSITEKTUR DUA LAPISAN
+   ============================================================
+   SOAL: Filter hanya by kecamatanId + mapel + kelas
+         (tidak pakai npsn, sehingga soal dari Kode 1 tetap muncul)
+   
+   SISWA/TOKEN/HASIL: Filter by kecamatanId + npsn
+         (npsn memisahkan data per sekolah)
    ============================================================ */
-function belongsToCurrentUser(doc){
-    if(!doc)return false;
-    var kecOk=doc.kecamatanId&&doc.kecamatanId===currentUser.kecamatanId;
-    var npsnOk=doc.npsn&&doc.npsn===currentUser.npsn;
-    return kecOk&&npsnOk;
+
+function soalBelongKec(q, kecId){
+    /* Soal milik kecamatan jika punya kecamatanId yang valid dan cocok */
+    return q && q.kecamatanId && q.kecamatanId.trim()!=='' && q.kecamatanId!=='undefined' && q.kecamatanId===kecId;
 }
-function hasValidScope(doc){
-    return doc.kecamatanId&&doc.kecamatanId.trim()!==''&&doc.kecamatanId!=='undefined'&&doc.npsn&&doc.npsn.trim()!==''&&doc.npsn!=='undefined';
+
+function docBelongSchool(doc){
+    /* Siswa/token/hasil milik sekolah jika kecamatanId + npsn keduanya cocok */
+    if(!doc)return false;
+    var kecOk=doc.kecamatanId && doc.kecamatanId===currentUser.kecamatanId;
+    var npsnOk=doc.npsn && doc.npsn===currentUser.npsn;
+    return kecOk && npsnOk;
 }
 
 var currentUser=null;
@@ -316,10 +325,8 @@ function handleRegister(){
     if(jenis==='kelas'){kelas=document.getElementById('regKelas').value;rombel=document.getElementById('regRombelKelas').value;if(!kelas||!rombel){showToast('Pilih Kelas dan Rombel','error');return}}
     else{rombel=document.getElementById('regRombelOnly').value;if(!rombel){showToast('Pilih Rombel','error');return}kelas='Kelas 1-6'}
 
-    // Cek apakah NIP sudah ada
     db.collection('teachers').where('nip','==',nip).get().then(function(snap){
         if(!snap.empty){showToast('NIP sudah terdaftar!','error');return}
-        // Cek apakah kombinasi Kecamatan + NPSN + Nama Guru sudah ada
         return db.collection('teachers').where('kecamatanId','==',kecId).where('npsn','==',npsn).where('namaGuru','==',nama).get();
     }).then(function(snap){
         if(!snap)return;
@@ -330,7 +337,7 @@ function handleRegister(){
             createdAt:firebase.firestore.FieldValue.serverTimestamp()
         });
     }).then(function(docRef){
-        if(docRef){showToast('Registrasi Berhasil! Data Anda terpisah per sekolah.','success');showAuth('login')}
+        if(docRef){showToast('Registrasi Berhasil! Soal akan tampil sesuai kecamatan Anda.','success');showAuth('login')}
     }).catch(function(e){showToast('Error: '+e.message,'error')});
 }
 
@@ -361,9 +368,6 @@ function loginSuccess(){
     showToast('Selamat Datang, '+currentUser.namaGuru,'success');buildSidebar();initApp();
 }
 
-/* ============================================================
-   SCOPE BAR — Tampilkan identitas akses sekolah di setiap halaman
-   ============================================================ */
 function scopeBarHtml(){
     var kecNama=escHtml(getKecNama(currentUser.kecamatanId));
     var sekolah=escHtml(currentUser.namaSekolah||'-');
@@ -416,15 +420,40 @@ function initApp(){
 }
 
 /* ============================================================
-   FILTER DATA: Hanya data milik kecamatanId + npsn guru login
+   FUNGSI FILTER UTAMA — DUA LAPISAN
    ============================================================ */
-function getMyQuestions(){return questionsAll.filter(function(q){return hasValidScope(q)&&belongsToCurrentUser(q)})}
-function getMyPAJQuestions(){return pajQuestionsAll.filter(function(q){return hasValidScope(q)&&belongsToCurrentUser(q)})}
-function getMyStudents(){return students.filter(function(s){return belongsToCurrentUser(s)})}
-function getMyStudentsKelas(kelas){return getMyStudents().filter(function(s){return s.kelas===kelas})}
-function getMyStudentsRombel(rombel){return getMyStudents().filter(function(s){return s.rombel===rombel})}
-function getMyTokens(){return examTokens.filter(function(t){return belongsToCurrentUser(t)})}
-function getMyResults(){return results.filter(function(r){return belongsToCurrentUser(r)})}
+
+/* SOAL: Hanya filter by kecamatanId (TANPA npsn)
+   Ini memastikan soal dari Kode 1 yang hanya punya kecamatanId
+   tetap muncul di Kode 2 */
+function getMyQuestions(){
+    return questionsAll.filter(function(q){
+        return soalBelongKec(q, currentUser.kecamatanId);
+    });
+}
+function getMyPAJQuestions(){
+    return pajQuestionsAll.filter(function(q){
+        return soalBelongKec(q, currentUser.kecamatanId);
+    });
+}
+
+/* SISWA/TOKEN/HASIL: Filter by kecamatanId + npsn
+   Ini memisahkan data per sekolah */
+function getMyStudents(){
+    return students.filter(function(s){ return docBelongSchool(s) });
+}
+function getMyStudentsKelas(kelas){
+    return getMyStudents().filter(function(s){ return s.kelas===kelas });
+}
+function getMyStudentsRombel(rombel){
+    return getMyStudents().filter(function(s){ return s.rombel===rombel });
+}
+function getMyTokens(){
+    return examTokens.filter(function(t){ return docBelongSchool(t) });
+}
+function getMyResults(){
+    return results.filter(function(r){ return docBelongSchool(r) });
+}
 
 function refreshCurrentView(){
     var ap=document.querySelector('.nav-item.active');if(!ap)return;var page=ap.dataset.page,c=document.getElementById('pageContent');if(!c)return;
@@ -498,9 +527,7 @@ function renderDashboard(c){
     var myStudentsCount=getMyStudentsRombel(currentUser.rombel).length;
     var satLabel=j==='pjok'?'PJOK':'SAT';var kecNama=getKecNama(currentUser.kecamatanId);
     var h='<div class="fade-in">';
-    // Scope bar
     h+=scopeBarHtml();
-    // Header
     h+='<div class="card mb-6 border-l-4 border-kopAccent"><div class="flex flex-wrap justify-between items-center gap-4"><div><h2 class="font-display text-kopAccent text-lg font-bold">DAAI SCORE BERSAMA</h2><p class="text-muted text-sm">KOREK API TAHUN 2026</p></div><div class="text-right text-xs text-muted"><div>'+escHtml(currentUser.namaSekolah||'')+'</div><div class="text-light font-bold">'+escHtml(currentUser.namaGuru)+' &mdash; '+(jl[j]||j)+'</div><div class="text-kopAccent mt-1"><i class="fas fa-map-marker-alt mr-1"></i>Kec. '+escHtml(kecNama)+'</div></div></div></div>';
     var colCount=hasPAJ?3:2;
     h+='<div class="grid grid-cols-2 md:grid-cols-'+colCount+' gap-4 mb-6">';
@@ -584,7 +611,8 @@ function printKartuSiswa(){
 }
 
 /* ============================================================
-   BANK SOAL — Filter: kecamatanId + npsn
+   BANK SOAL — Filter: kecamatanId SAJA (tanpa npsn)
+   Soal dari Kode 1 akan muncul karena hanya cek kecamatanId
    ============================================================ */
 var currentEditQuestionId=null;
 function renderBankSoal(c,isPAJ){
@@ -596,8 +624,11 @@ function renderBankSoal(c,isPAJ){
 }
 function renderBankList(isPAJ){
     var mapel=document.getElementById('filterMapel').value,kelas=document.getElementById('filterKelas').value,container=document.getElementById('bankListContainer');if(!container)return;
-    var allQ=isPAJ?getMyPAJQuestions():getMyQuestions();if(mapel)allQ=allQ.filter(function(q){return q.mapel===mapel});if(kelas)allQ=allQ.filter(function(q){return q.kelas===kelas});
-    if(!allQ.length){container.innerHTML='<div class="text-center py-10"><i class="fas fa-inbox text-3xl text-muted opacity-30 mb-3 block"></i><p class="text-muted">Tidak ada soal untuk sekolah Anda</p></div>';return}
+    /* Filter: kecamatanId + mapel + kelas (TANPA npsn) */
+    var allQ=isPAJ?getMyPAJQuestions():getMyQuestions();
+    if(mapel)allQ=allQ.filter(function(q){return q.mapel===mapel});
+    if(kelas)allQ=allQ.filter(function(q){return q.kelas===kelas});
+    if(!allQ.length){container.innerHTML='<div class="text-center py-10"><i class="fas fa-inbox text-3xl text-muted opacity-30 mb-3 block"></i><p class="text-muted">Tidak ada soal untuk kecamatan Anda</p></div>';return}
     container.innerHTML=allQ.map(function(q){
         var badge=q.type==='pg'?'bg-kopAccent/20 text-kopAccent':'bg-info/20 text-info';
         var kt=q.correctKey||q.answer;var kc=isPAJ?'danger':'success',kb=isPAJ?'danger':'success';
@@ -622,7 +653,7 @@ function saveEditKey(){
 }
 
 /* ============================================================
-   TOKEN — Filter: kecamatanId + npsn
+   TOKEN — Filter: kecamatanId + npsn (per sekolah)
    ============================================================ */
 function renderToken(c,isPAJ){
     var j=currentUser.jenisGuru;var title=isPAJ?'Token PAJ':(j==='pjok'?'Token PJOK':'Token SAT');
@@ -645,7 +676,7 @@ function genToken(isPAJ){
 function delToken(id){if(confirm('Hapus token?'))db.collection('exam_tokens').doc(id).delete().then(function(){showToast('Terhapus')}).catch(function(){})}
 
 /* ============================================================
-   KOREKSI & NILAI — Filter: kecamatanId + npsn
+   KOREKSI & NILAI — Filter: kecamatanId + npsn (per sekolah)
    ============================================================ */
 function renderKoreksi(c,isPAJ){
     var j=currentUser.jenisGuru;var title=isPAJ?'Koreksi & Nilai PAJ':(j==='pjok'?'Koreksi & Nilai PJOK':'Koreksi & Nilai SAT');
@@ -679,11 +710,14 @@ function loadKorData(isPAJ){
 }
 
 /* ============================================================
-   MODAL KOREKSI — Filter: kecamatanId + npsn
+   MODAL KOREKSI — Soal diambil by kecamatanId, siswa by npsn
    ============================================================ */
 function openCorrectionModal(resultId,siswaNama,isPAJ){
     var r=getMyResults().find(function(x){return x.id===resultId});if(!r){showToast('Data tidak ditemukan','error');return}
-    var mapel=r.mapel;var qList=isPAJ?getMyPAJQuestions():getMyQuestions();var examQ=qList.filter(function(q){return q.mapel===mapel&&q.kelas===r.kelas});
+    var mapel=r.mapel;
+    /* Soal diambil dari kecamatan (tanpa npsn) */
+    var qList=isPAJ?getMyPAJQuestions():getMyQuestions();
+    var examQ=qList.filter(function(q){return q.mapel===mapel&&q.kelas===r.kelas});
     var pgList=examQ.filter(function(q){return q.type==='pg'});var esList=examQ.filter(function(q){return q.type==='uraian'});
     var cl=isPAJ?'danger':'kopAccent';
     var mh='<div id="correctionModal" class="modal-overlay active" style="z-index:60"><div class="modal-box" style="max-width:740px"><div class="modal-header"><div><h3 class="font-bold text-lg text-light">Koreksi Jawaban</h3><p class="text-sm text-'+cl+'">'+escHtml(siswaNama)+' &mdash; '+getMapelName(mapel)+' &mdash; '+r.kelas+'</p><p class="text-xs text-muted mt-1"><i class="fas fa-info-circle mr-1"></i>Jawaban PG bisa diubah via dropdown.</p></div><button onclick="document.getElementById(\'correctionModal\').remove()" class="text-muted hover:text-white text-xl"><i class="fas fa-times"></i></button></div><div class="modal-body">';
@@ -726,7 +760,8 @@ function openCorrectionModal(resultId,siswaNama,isPAJ){
 }
 function saveCorrection(resultId,isPAJ){
     var r=getMyResults().find(function(x){return x.id===resultId});if(!r)return;var mapel=r.mapel;
-    var qList=isPAJ?getMyPAJQuestions():getMyQuestions();var examQ=qList.filter(function(q){return q.mapel===mapel&&q.kelas===r.kelas});
+    var qList=isPAJ?getMyPAJQuestions():getMyQuestions();
+    var examQ=qList.filter(function(q){return q.mapel===mapel&&q.kelas===r.kelas});
     var pgList=examQ.filter(function(q){return q.type==='pg'});var esList=examQ.filter(function(q){return q.type==='uraian'});
     var answers=r.answers?Object.assign({},r.answers):{};var pgChanges=false;
     pgList.forEach(function(q,idx){var sel=document.getElementById('pgEdit_'+idx);if(sel){var oldVal=answers[q.id]?(String(answers[q.id]).toUpperCase()):null;var newVal=sel.value?sel.value.toUpperCase():null;if(newVal!==oldVal){pgChanges=true;if(newVal){answers[q.id]=newVal}else{delete answers[q.id]}}}});
@@ -742,7 +777,7 @@ function saveCorrection(resultId,isPAJ){
 }
 
 /* ============================================================
-   CETAK NILAI — Filter: kecamatanId + npsn
+   CETAK NILAI — Filter: kecamatanId + npsn (per sekolah)
    ============================================================ */
 function printNilai(isPAJ){
     var mapelEl=document.getElementById('korMapel'),kelasEl=document.getElementById('korKelas');if(!mapelEl||!kelasEl){showToast('Buka halaman Koreksi dulu','error');return}
@@ -760,7 +795,7 @@ function printNilai(isPAJ){
 }
 
 /* ============================================================
-   CETAK NASKAH — Filter: kecamatanId + npsn
+   CETAK NASKAH — Soal diambil by kecamatanId (tanpa npsn)
    ============================================================ */
 function renderPrint(c,isPAJ){
     var j=currentUser.jenisGuru;var title=isPAJ?'Cetak Naskah PAJ':(j==='pjok'?'Cetak Naskah PJOK':'Cetak Naskah SAT');
@@ -772,7 +807,9 @@ function renderPrint(c,isPAJ){
 function refreshPrintPreview(isPAJ){
     var mapel=document.getElementById('prMapel').value,kelas=document.getElementById('prKelas').value,container=document.getElementById('printPreviewContainer');
     if(!mapel||!kelas){container.innerHTML='<div class="print-preview-sheet text-center p-10 text-gray-400">Pilih Mapel & Kelas</div>';return}
-    var qList=isPAJ?getMyPAJQuestions():getMyQuestions();var data=qList.filter(function(q){return q.mapel===mapel&&q.kelas===kelas});
+    /* Soal diambil dari kecamatan (tanpa npsn) */
+    var qList=isPAJ?getMyPAJQuestions():getMyQuestions();
+    var data=qList.filter(function(q){return q.mapel===mapel&&q.kelas===kelas});
     if(!data.length){container.innerHTML='<div class="print-preview-sheet text-center p-10"><p style="color:red;font-weight:bold;font-size:14pt">TIDAK ADA SOAL</p></div>';return}
     var pg=data.filter(function(q){return q.type==='pg'}),uraian=data.filter(function(q){return q.type==='uraian'});
     var logo='https://www.image2url.com/r2/default/images/1777478846444-f4b5c6a3-c5ad-400c-9fb2-0a124083dc7e.jpeg';var sekolah=currentUser.namaSekolah?escHtml(currentUser.namaSekolah):'Korek Api';var kecNama=escHtml(getKecNama(currentUser.kecamatanId));
@@ -797,7 +834,7 @@ function doPrintSoal(){
 }
 
 /* ============================================================
-   KUNCI JAWABAN — Filter: kecamatanId + npsn
+   KUNCI JAWABAN — Soal diambil by kecamatanId (tanpa npsn)
    ============================================================ */
 function renderKunciJawaban(c,isPAJ){
     var j=currentUser.jenisGuru;var title=isPAJ?'Kunci Jawaban PAJ':'Kunci Jawaban '+(j==='pjok'?'PJOK':'SAT');var rk=isPAJ?'kunci-paj':'kunci-sat';
@@ -815,7 +852,9 @@ function refreshKunciJawaban(isPAJ){
     var mapelEl=document.getElementById('kncMapel'),kelasEl=document.getElementById('kncKelas'),container=document.getElementById('kunciPreviewContainer');
     if(!mapelEl||!kelasEl||!container)return;var mapel=mapelEl.value,kelas=kelasEl.value;
     if(!mapel||!kelas){container.innerHTML='<div class="print-preview-sheet text-center p-10 text-gray-400">Pilih Mapel & Kelas</div>';return}
-    var qList=isPAJ?getMyPAJQuestions():getMyQuestions();var data=qList.filter(function(q){return q.mapel===mapel&&q.kelas===kelas});
+    /* Soal diambil dari kecamatan (tanpa npsn) */
+    var qList=isPAJ?getMyPAJQuestions():getMyQuestions();
+    var data=qList.filter(function(q){return q.mapel===mapel&&q.kelas===kelas});
     if(!data.length){container.innerHTML='<div class="print-preview-sheet text-center p-10"><p style="color:red;font-weight:bold;font-size:14pt">TIDAK ADA SOAL</p></div>';return}
     var pg=data.filter(function(q){return q.type==='pg'});var uraian=data.filter(function(q){return q.type==='uraian'});
     var logo='https://www.image2url.com/r2/default/images/1777478846444-f4b5c6a3-c5ad-400c-9fb2-0a124083dc7e.jpeg';var sekolah=currentUser.namaSekolah?escHtml(currentUser.namaSekolah):'Korek Api';var kecNama=escHtml(getKecNama(currentUser.kecamatanId));
